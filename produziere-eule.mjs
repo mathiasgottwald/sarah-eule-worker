@@ -70,25 +70,35 @@ function ergebnisUrl(job) {
   return null;
 }
 
-/** /account/workspaces holen (nur Bearer) → rohe Antwort + User-Id-Kandidaten. */
+/**
+ * /account/workspaces je Surface holen → welche Surface hat den Workspace
+ * SELECTED (is_selected=true)? Die Workspace-Auswahl ist SURFACE-spezifisch;
+ * per MCP wurde sie für surface 'mcp' gesetzt. Gibt {raw, selektierteSurface}.
+ */
 async function holeKontext(token) {
-  const res = await fetch(`${API_BASE}/developer/v2alpha/account/workspaces`, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-  });
-  const raw = await res.text();
-  if (res.status === 401) throw new LoginAbgelaufenError("401 /account/workspaces");
-  const user_ = raw.match(/user_[A-Za-z0-9]+/g) || [];
-  const uuids = (raw.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) || []).filter((x) => x.toLowerCase() !== WORKSPACE_ID.toLowerCase());
-  const userIds = [...new Set([...user_, ...uuids])];
-  return { raw: raw.slice(0, 600), userIds };
+  let raw = "";
+  let selektiert = null;
+  for (const surface of ["mcp", "app", "web", "cli", "developer"]) {
+    const res = await fetch(`${API_BASE}/developer/v2alpha/account/workspaces`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/json", "x-fnf-surface": surface },
+    });
+    if (res.status === 401) throw new LoginAbgelaufenError("401 /account/workspaces");
+    const t = await res.text();
+    if (surface === "mcp") raw = t.slice(0, 500);
+    if (new RegExp(`"id":"${WORKSPACE_ID}"[^}]*"is_selected":true`, "i").test(t) || /"is_selected":true/i.test(t)) {
+      selektiert = surface;
+      break;
+    }
+  }
+  return { raw, selektierteSurface: selektiert };
 }
 
-/** Kandidaten-Formen (User-Id × Surface × Placement). Header zuerst. */
-function formenFuer(userIds) {
-  const uids = userIds.length ? userIds.slice(0, 3) : [""];
-  const formen = [];
-  for (const surface of ["cli", "developer"]) for (const uid of uids) formen.push({ surface, uid, ort: "header" });
-  for (const ort of ["query", "body", "params"]) formen.push({ surface: "cli", uid: uids[0], ort });
+/** Kandidaten-Formen. Die Surface mit selektiertem Workspace zuerst, dann übrige. */
+function formenFuer(selektierteSurface) {
+  const surfaces = [selektierteSurface, "mcp", "app", "web", "cli", "developer"].filter(Boolean);
+  const uniq = [...new Set(surfaces)];
+  const formen = uniq.map((surface) => ({ surface, uid: "", ort: "header" }));
+  formen.push({ surface: uniq[0], uid: "", ort: "query" });
   return formen;
 }
 
@@ -155,8 +165,8 @@ export async function produziereEule(text) {
   catch (e) { throw new LoginAbgelaufenError(e instanceof Error ? e.message : String(e)); }
 
   const kontext = await holeKontext(token);
-  console.log(`[eule] user-id-Kandidaten: ${kontext.userIds.join(", ") || "(keine)"}`);
-  const formen = formenFuer(kontext.userIds);
+  console.log(`[eule] selektierte Surface: ${kontext.selektierteSurface || "(keine — Workspace nirgends selected!)"}`);
+  const formen = formenFuer(kontext.selektierteSurface);
   const dauer = schaetzeDauer(text);
 
   // 1) TTS
