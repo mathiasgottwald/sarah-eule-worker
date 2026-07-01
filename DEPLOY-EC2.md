@@ -64,42 +64,43 @@ chmod 600 ~/worker/.env
 nano ~/worker/.env    # Platzhalter ersetzen → Strg+O, Enter, Strg+X
 ```
 
-### 6) Higgsfield-Login HEADLESS (bewiesen — Loopback-Callback nachspielen)
+### 6) Higgsfield-Login per credentials.json vom Mac (empfohlen — Weg C)
 
-Die CLI kann nur **OAuth-Browser-Login** (kein Device-/Token-Modus). Auf einem
-Server ohne Browser scheitert der `127.0.0.1:8765`-Callback — Lösung: die CLI
-druckt die Login-URL und wartet; du machst den Browser-Teil am **Laptop** und
-spielst die zurückgegebene Callback-URL **auf dem Server** gegen dessen eigenen
-Listener ab. Kein SSH, keine Datei, nichts am Laptop zu installieren.
+Die CLI kann nur **OAuth-Browser-Login** (kein Device-/Token-Modus, kein Env-Key —
+verifiziert am Binary). Am einfachsten: auf einem **Mac mit Browser** einloggen und
+die entstehende Credential-Datei (enthält `refresh_token` → selbst-erneuernd) auf
+den Server bringen.
 
-**① Login starten (ganzen Block einfügen):**
+**Auf dem MAC (Terminal):**
 ```bash
-cd ~/worker
-pkill -f 'auth login' 2>/dev/null; sleep 1
-export BROWSER=echo
-higgsfield auth login --port 8765 >/tmp/hflogin.txt 2>&1 &
-sleep 5
-echo; echo '>>> DIESE URL AUF DEINEM LAPTOP IM BROWSER OEFFNEN:'; echo
-grep -Eo 'https://[^ ]*oauth/authorize[^ ]*' /tmp/hflogin.txt | head -1
-echo; echo '(falls oben leer: Log unten)'; echo '----'; cat /tmp/hflogin.txt
+# (falls node fehlt: brew install node)
+npm install -g @higgsfield/cli
+higgsfield auth login                      # öffnet Browser, ein Klick
+# Token-Datei ausgeben und KOMPLETT kopieren (findet sie sicher):
+cat "$(find ~/Library/Application\ Support ~/.config -name credentials.json -path '*higgsfield*' 2>/dev/null | head -1)"
 ```
+Exakter Pfad i.d.R. `~/Library/Application Support/higgsfield/credentials.json`.
+Der ausgegebene JSON-Block ist der Login — ganz markieren + kopieren.
 
-**② Am Laptop:** die URL öffnen, mit dem **Higgsfield-Konto anmelden**. Der Browser
-springt danach auf `http://127.0.0.1:8765/callback?code=…&state=…` und zeigt
-**„Seite nicht erreichbar" — das ist normal.** Die **komplette Adresse** aus der
-Adresszeile **kopieren**.
-
-**③ Zurück in DERSELBEN Server-Shell** (URL einsetzen):
+**In der SERVER-Shell (als User `ubuntu`, kein sudo):**
 ```bash
-curl -s "HIER_DIE_KOMPLETTE_127.0.0.1-8765-URL_EINFUEGEN" >/dev/null
-sleep 3; cat /tmp/hflogin.txt
-higgsfield auth token >/dev/null 2>&1 && echo 'LOGIN OK' || echo 'nochmal Schritt 1 + 3'
+mkdir -p ~/.config/higgsfield
+cat > ~/.config/higgsfield/credentials.json
+# <-- jetzt den kopierten JSON-Inhalt EINFÜGEN, dann ENTER, dann Strg+D
 ```
+danach:
+```bash
+chmod 600 ~/.config/higgsfield/credentials.json
+higgsfield auth token >/dev/null 2>&1 && echo '✅ eingeloggt' || echo '❌ nicht eingeloggt'
+```
+Der Dienst (Schritt 8) läuft mit `HOME=/home/ubuntu` und liest genau diese Datei.
 
-> Zeigt ③ „invalid state"/Fehler (URL vertippt oder zu spät): einfach ① neu laufen
-> lassen (neue URL/state) und ②–③ wiederholen. `code` ist einmalig + kurzlebig.
-> Diesen Login als User `ubuntu` ausführen (kein `sudo`) — der Token landet in
-> `~/.config/higgsfield/` und muss zum Dienst-User (Schritt 8) passen.
+> **Fallback (nur ohne Mac-Zugriff): Loopback-Callback direkt auf dem Server.**
+> `export BROWSER=echo; higgsfield auth login --port 8765 >/tmp/hflogin.txt 2>&1 &`
+> → `sleep 5; grep -Eo 'https://[^ ]*oauth/authorize[^ ]*' /tmp/hflogin.txt` → URL am
+> Laptop öffnen/anmelden → die zurückgegebene `127.0.0.1:8765/callback?...`-Adresse
+> (Laptop zeigt „nicht erreichbar" = normal) kopieren → auf dem Server
+> `curl "<callback-url>"` → fertig. Bei „invalid state" den Login neu starten.
 
 ### 7) Erster echter Testlauf
 Zuerst in SARAH (`/video`) einen kurzen Text **„In Warteschlange legen"**. Dann:
