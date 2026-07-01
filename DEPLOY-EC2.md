@@ -64,43 +64,44 @@ chmod 600 ~/worker/.env
 nano ~/worker/.env    # Platzhalter ersetzen → Strg+O, Enter, Strg+X
 ```
 
-### 6) Higgsfield-Login per credentials.json vom Mac (empfohlen — Weg C)
+### 6) Higgsfield-Login mit dem Helfer `hf-login.mjs` (empfohlen)
 
 Die CLI kann nur **OAuth-Browser-Login** (kein Device-/Token-Modus, kein Env-Key —
-verifiziert am Binary). Am einfachsten: auf einem **Mac mit Browser** einloggen und
-die entstehende Credential-Datei (enthält `refresh_token` → selbst-erneuernd) auf
-den Server bringen.
+am Binary verifiziert), und Clerks Consent leitet nicht zuverlässig auf den
+127.0.0.1-Loopback zurück. Der mitgelieferte Helfer macht den OAuth-PKCE-Flow
+**von Hand**: er zeigt die Login-URL, du bestätigst im Browser, gibst den `code`
+zurück — er tauscht ihn (Public-Client-PKCE, ohne Secret — verifiziert) gegen
+`access_token`+`refresh_token` und schreibt genau die Datei, die die CLI/der
+Worker liest. Kein Listener, kein curl-auf-localhost, keine Datei-Kopie.
 
-**Auf dem MAC (Terminal):**
+**Vorher (empfohlen): CLI aktuell halten** (1.1.0):
 ```bash
-# (falls node fehlt: brew install node)
-npm install -g @higgsfield/cli
-higgsfield auth login                      # öffnet Browser, ein Klick
-# Token-Datei ausgeben und KOMPLETT kopieren (findet sie sicher):
-cat "$(find ~/Library/Application\ Support ~/.config -name credentials.json -path '*higgsfield*' 2>/dev/null | head -1)"
+sudo npm install -g @higgsfield/cli@latest
 ```
-Exakter Pfad i.d.R. `~/Library/Application Support/higgsfield/credentials.json`.
-Der ausgegebene JSON-Block ist der Login — ganz markieren + kopieren.
 
-**In der SERVER-Shell (als User `ubuntu`, kein sudo):**
+**Auf dem SERVER (als User `ubuntu`, kein sudo):**
 ```bash
-mkdir -p ~/.config/higgsfield
-cat > ~/.config/higgsfield/credentials.json
-# <-- jetzt den kopierten JSON-Inhalt EINFÜGEN, dann ENTER, dann Strg+D
+cd ~/worker && node hf-login.mjs
 ```
-danach:
-```bash
-chmod 600 ~/.config/higgsfield/credentials.json
-higgsfield auth token >/dev/null 2>&1 && echo '✅ eingeloggt' || echo '❌ nicht eingeloggt'
-```
-Der Dienst (Schritt 8) läuft mit `HOME=/home/ubuntu` und liest genau diese Datei.
+1. Der Helfer druckt eine **Login-URL**. Öffne sie auf **deinem Laptop** im Browser,
+   in dem du bei **higgsfield.ai eingeloggt** bist, und bestätige den Zugriff.
+2. Danach springt der Browser auf `http://127.0.0.1:8765/callback?code=…&state=…`
+   und zeigt **„Seite nicht erreichbar" — das ist ok**. Kopiere die **komplette
+   Adresse** aus der Adresszeile.
+   - *Falls der Browser gar nicht navigiert:* F12 → Tab **Network**, nochmal
+     „Erlauben", und in der letzten Anfrage die `code=`-URL kopieren.
+3. Füge die Adresse (oder nur den `code`) im Helfer ein → Enter. Er schreibt
+   `~/.config/higgsfield/credentials.json` und prüft sich selbst
+   (`higgsfield account status`).
 
-> **Fallback (nur ohne Mac-Zugriff): Loopback-Callback direkt auf dem Server.**
-> `export BROWSER=echo; higgsfield auth login --port 8765 >/tmp/hflogin.txt 2>&1 &`
-> → `sleep 5; grep -Eo 'https://[^ ]*oauth/authorize[^ ]*' /tmp/hflogin.txt` → URL am
-> Laptop öffnen/anmelden → die zurückgegebene `127.0.0.1:8765/callback?...`-Adresse
-> (Laptop zeigt „nicht erreichbar" = normal) kopieren → auf dem Server
-> `curl "<callback-url>"` → fertig. Bei „invalid state" den Login neu starten.
+> **Fallback A (Login am Mac, Datei kopieren):** Auf einem Mac
+> `npm i -g @higgsfield/cli` + `node hf-login.mjs` (schreibt
+> `~/Library/Application Support/higgsfield/credentials.json`), Inhalt kopieren, auf
+> dem Server via `mkdir -p ~/.config/higgsfield && cat > ~/.config/higgsfield/credentials.json`
+> (einfügen, Strg+D), `chmod 600`.
+> **Fallback B (CLI schreibt die Datei selbst):** `higgsfield auth login --port 8765 &`
+> auf dem Server, URL am Laptop bestätigen, die zurückgegebene `127.0.0.1:8765/...`-URL
+> auf dem Server `curl`en → die CLI schließt den Login ab.
 
 ### 7) Erster echter Testlauf
 Zuerst in SARAH (`/video`) einen kurzen Text **„In Warteschlange legen"**. Dann:
