@@ -20,6 +20,7 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { frischerToken } from "./hf-token.mjs";
 
 const BIN = process.env.HIGGSFIELD_BIN || "higgsfield";
 
@@ -132,6 +133,14 @@ async function ladeDatei(url, suffix) {
  * Wirft LoginAbgelaufenError, wenn der Login erneuert werden muss.
  */
 export async function produziereEule(text) {
+  // Vor der CLI-Kette den access_token frisch halten (CLI-Auto-Refresh ist
+  // unzuverlässig). Schlägt der Refresh fehl → Login abgelaufen (Job requeuen).
+  try {
+    await frischerToken();
+  } catch (e) {
+    throw new LoginAbgelaufenError(e instanceof Error ? e.message : String(e));
+  }
+
   const dauer = schaetzeDauer(text);
 
   // 1) TTS: text2speech_v2 mit geklonter "SARAH Stimme".

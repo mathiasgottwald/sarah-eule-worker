@@ -106,10 +106,11 @@ cd ~/worker && node hf-login.mjs
 ### 6b) Workspace setzen (einmalig)
 Die CLI 1.1.0 verlangt einen **gesetzten Workspace** (auch `account status`);
 `workspace unset` genügt NICHT. `higgsfield workspace list` kann mit „no response
-received" hängen — daher die Workspace-ID direkt per API holen (das ist zugleich
-der Netz-Test von server-2):
+received" hängen — daher die Workspace-ID direkt per API holen. **Wichtig:** NICHT
+`higgsfield auth token` nutzen (liefert teils einen abgelaufenen Token) — sondern
+den Helfer `hf-token.mjs`, der bei Bedarf per `refresh_token` erneuert:
 ```bash
-TOKEN=$(higgsfield auth token 2>/dev/null | tr -d '[:space:]')
+TOKEN=$(node ~/worker/hf-token.mjs)
 curl -sS -H "Authorization: Bearer $TOKEN" \
   https://fnf-api-gw.higgsfield.ai/fnf/developer/v2alpha/account/workspaces
 ```
