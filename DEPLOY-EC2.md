@@ -103,6 +103,18 @@ cd ~/worker && node hf-login.mjs
 > auf dem Server, URL am Laptop bestätigen, die zurückgegebene `127.0.0.1:8765/...`-URL
 > auf dem Server `curl`en → die CLI schließt den Login ab.
 
+### 6b) Persönlichen Account-Kontext wählen (einmalig)
+Die CLI verlangt eine Kontext-Wahl. Der persönliche Account (Credits + „SARAH
+Stimme" + Eule) wird **ohne Workspace-ID** gewählt — rein lokal, kein Netz:
+```bash
+higgsfield workspace unset
+higgsfield account status     # muss jetzt E-Mail/Plan/Credits zeigen
+```
+> „No workspace selected" ist ein Client-Riegel, KEIN Fehler des Logins.
+> `higgsfield workspace list` braucht man NICHT (und es kann hängen). `generate`
+> hat keinen Workspace-Parameter. Der Worker führt `workspace unset` beim Start
+> ohnehin selbst aus — dieser Schritt dient nur der sofortigen Prüfung.
+
 ### 7) Erster echter Testlauf
 Zuerst in SARAH (`/video`) einen kurzen Text **„In Warteschlange legen"**. Dann:
 ```bash

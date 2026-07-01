@@ -11,7 +11,7 @@
  * nie in SARAHs Client.
  */
 import { createClient } from "@supabase/supabase-js";
-import { produziereEule, LoginAbgelaufenError } from "./produziere-eule.mjs";
+import { produziereEule, LoginAbgelaufenError, sicherePersoenlichenKontext } from "./produziere-eule.mjs";
 
 const URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -87,6 +87,7 @@ async function verarbeite(job) {
 
 async function main() {
   log(`gestartet. Poll alle ${POLL_MS / 1000}s.${EINMAL ? " (Einmal-Modus)" : ""}`);
+  sicherePersoenlichenKontext(); // persönlicher Account-Kontext (verhindert "No workspace selected")
   while (laeuftWeiter) {
     const job = await holeUndUebernimm().catch((e) => { log("Schleifenfehler:", e?.message); return null; });
     if (!job) {
