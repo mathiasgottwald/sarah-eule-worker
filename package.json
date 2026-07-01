@@ -8,8 +8,5 @@
   "scripts": {
     "start": "node worker.mjs",
     "einmal": "node worker.mjs --einmal"
-  },
-  "dependencies": {
-    "@supabase/supabase-js": "^2.45.0"
   }
 }

@@ -1,30 +1,31 @@
 /**
  * SARAH — Eulen-Video-Worker (Stufe 2b).
  *
- * Dauer-Prozess auf einer kleinen, EINGELOGGTEN Box (higgsfield auth login).
- * Handshake rein über die DB (video_jobs):
+ * Dauer-Prozess auf server-2. Handshake rein über die DB (video_jobs):
  *   queued --(claim)--> in_arbeit --(produziert)--> fertig  (bzw. fehler)
- * Login abgelaufen -> Job zurück auf 'queued' (kein Verlust), Worker wartet.
+ * Token nicht erneuerbar -> Job zurück auf 'queued' (kein Verlust), Worker wartet.
  *
- * Secrets NUR aus der Umgebung, werden NIE geloggt. Nutzt den Service-Role-Key
- * (umgeht RLS bewusst) — dieser liegt AUSSCHLIESSLICH hier auf der Worker-Box,
- * nie in SARAHs Client.
+ * DB-Zugriff über Supabase PostgREST DIREKT per fetch (KEIN @supabase/supabase-js
+ * → kein Realtime/WebSocket, das Node 20 nicht nativ hat; kein ws-Paket nötig).
+ * Der Service-Role-Key (umgeht RLS) liegt NUR hier auf der Box, nie im Client.
  */
-import { createClient } from "@supabase/supabase-js";
+import "./load-env.mjs"; // MUSS zuerst stehen: lädt ~/worker/.env (abs. Pfad) in process.env
 import { produziereEule, LoginAbgelaufenError } from "./produziere-eule.mjs";
 
-const URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const BASE = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "").replace(/\/+$/, "");
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
-const LOGIN_WARTE_MS = Number(process.env.LOGIN_WARTE_MS || 300_000); // nach Login-Ablauf länger warten
+const LOGIN_WARTE_MS = Number(process.env.LOGIN_WARTE_MS || 300_000);
 const EINMAL = process.argv.includes("--einmal");
 
-if (!URL || !KEY) {
-  console.error("[worker] FEHLT: SUPABASE_URL und/oder SUPABASE_SERVICE_ROLE_KEY (siehe .env.example).");
+if (!BASE || !KEY) {
+  console.error("[worker] FEHLT: SUPABASE_URL und/oder SUPABASE_SERVICE_ROLE_KEY (siehe .env.example / ~/worker/.env).");
   process.exit(1);
 }
 
-const db = createClient(URL, KEY, { auth: { persistSession: false } });
+const REST = `${BASE}/rest/v1/video_jobs`;
+const dbHeaders = (extra = {}) => ({ apikey: KEY, authorization: `Bearer ${KEY}`, "content-type": "application/json", ...extra });
+
 let laeuftWeiter = true;
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { laeuftWeiter = false; });
 
@@ -32,55 +33,56 @@ const schlaf = (ms) => new Promise((r) => setTimeout(r, ms));
 const jetzt = () => new Date().toISOString();
 const log = (...a) => console.log(`[worker ${jetzt()}]`, ...a);
 
-/** Nächsten offenen Job atomar übernehmen. Gibt den Job oder null. */
+/** Nächsten offenen Job atomar übernehmen. Gibt den Job {id,text} oder null. */
 async function holeUndUebernimm() {
-  const { data: offen, error } = await db
-    .from("video_jobs")
-    .select("id, text")
-    .eq("status", "queued")
-    .order("erstellt_am", { ascending: true })
-    .limit(1);
-  if (error) { log("DB-Lesefehler:", error.message); return null; }
-  const job = offen?.[0];
+  // 1) ältesten queued-Job lesen
+  const sel = await fetch(`${REST}?status=eq.queued&order=erstellt_am.asc&limit=1&select=id,text`, { headers: dbHeaders() });
+  if (!sel.ok) { log("DB-Lesefehler:", sel.status, (await sel.text().catch(() => "")).slice(0, 200)); return null; }
+  const offen = await sel.json();
+  const job = Array.isArray(offen) ? offen[0] : null;
   if (!job) return null;
-  // Atomar beanspruchen: nur wenn noch 'queued' (verhindert Doppelverarbeitung).
-  const { data: claimed, error: claimErr } = await db
-    .from("video_jobs")
-    .update({ status: "in_arbeit", verarbeitung_gestartet_am: jetzt(), fehler_text: null })
-    .eq("id", job.id)
-    .eq("status", "queued")
-    .select("id, text");
-  if (claimErr) { log("Claim-Fehler:", claimErr.message); return null; }
-  return claimed?.[0] ?? null; // leer = anderer Worker war schneller
+  // 2) atomar beanspruchen: PATCH nur solange status noch 'queued' (verhindert Doppelverarbeitung)
+  const claim = await fetch(`${REST}?id=eq.${encodeURIComponent(job.id)}&status=eq.queued`, {
+    method: "PATCH",
+    headers: dbHeaders({ Prefer: "return=representation" }),
+    body: JSON.stringify({ status: "in_arbeit", verarbeitung_gestartet_am: jetzt(), fehler_text: null }),
+  });
+  if (!claim.ok) { log("Claim-Fehler:", claim.status, (await claim.text().catch(() => "")).slice(0, 200)); return null; }
+  const claimed = await claim.json();
+  return (Array.isArray(claimed) && claimed[0]) || null; // leer = anderer Worker war schneller
+}
+
+/** Felder eines Jobs setzen (PATCH nach id). */
+async function dbUpdate(id, patch) {
+  const res = await fetch(`${REST}?id=eq.${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: dbHeaders({ Prefer: "return=minimal" }),
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) log("DB-Update-Fehler:", res.status, (await res.text().catch(() => "")).slice(0, 200));
 }
 
 async function verarbeite(job) {
   log(`Job ${job.id}: produziere…`);
   try {
     const { videoUrl, audioRef, dauer } = await produziereEule(job.text || "");
-    await db.from("video_jobs").update({
-      video_url: videoUrl,
-      audio_url: audioRef,
-      dauer_sek: dauer,
-      status: "fertig",
-      fehler_text: null,
-    }).eq("id", job.id);
-    log(`Job ${job.id}: FERTIG (${dauer}s).`);
+    await dbUpdate(job.id, { video_url: videoUrl, audio_url: audioRef, dauer_sek: dauer, status: "fertig", fehler_text: null });
+    log(`Job ${job.id}: FERTIG (${dauer}s) → ${videoUrl}`);
     return "fertig";
   } catch (e) {
     if (e instanceof LoginAbgelaufenError) {
-      // Job NICHT verwerfen — zurück in die Warteschlange, Worker wartet auf Re-Login.
-      await db.from("video_jobs").update({
+      // Job NICHT verwerfen — zurück in die Warteschlange, Worker wartet auf frischen Token.
+      await dbUpdate(job.id, {
         status: "queued",
         verarbeitung_gestartet_am: null,
-        fehler_text: "Higgsfield-Login abgelaufen – auf dem Worker `higgsfield auth login` erneut ausführen. Job wartet.",
-      }).eq("id", job.id);
-      log("!!! LOGIN ABGELAUFEN — bitte `higgsfield auth login` auf dem Worker ausführen. Job bleibt in der Warteschlange.");
+        fehler_text: "Higgsfield-Token nicht erneuerbar – auf dem Worker neu einloggen (hf-login.mjs). Job wartet.",
+      });
+      log(`!!! TOKEN/LOGIN-Problem — ${e.message}. Job bleibt in der Warteschlange.`);
       return "login";
     }
     const msg = e instanceof Error ? e.message : String(e);
-    await db.from("video_jobs").update({ status: "fehler", fehler_text: msg.slice(0, 500) }).eq("id", job.id);
-    log(`Job ${job.id}: FEHLER — ${msg.slice(0, 200)}`);
+    await dbUpdate(job.id, { status: "fehler", fehler_text: msg.slice(0, 500) });
+    log(`Job ${job.id}: FEHLER — ${msg.slice(0, 300)}`);
     return "fehler";
   }
 }
@@ -96,7 +98,7 @@ async function main() {
     }
     const ergebnis = await verarbeite(job);
     if (EINMAL) break;
-    if (ergebnis === "login") await schlaf(LOGIN_WARTE_MS); // nicht heißdrehen, bis Re-Login da ist
+    if (ergebnis === "login") await schlaf(LOGIN_WARTE_MS);
   }
   log("beendet.");
 }
