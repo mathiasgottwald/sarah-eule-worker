@@ -48,20 +48,6 @@ function istLoginFehler(text) {
   return /not authenticated|session expired|unauthori|auth login|please log ?in|401/i.test(text || "");
 }
 
-/**
- * Einmalig sicherstellen, dass die CLI im PERSÖNLICHEN Account-Kontext läuft
- * (dort liegen Credits + "SARAH Stimme" + Eule). Verhindert den Client-Riegel
- * "No workspace selected". Rein lokal (schreibt config.json), kein Netz/kein
- * Workspace nötig. Best-effort — Fehler werden bewusst ignoriert.
- */
-export function sicherePersoenlichenKontext() {
-  try {
-    spawnSync(BIN, ["workspace", "unset"], { encoding: "utf8", timeout: 15000 });
-  } catch {
-    /* best-effort */
-  }
-}
-
 /** Grobe Dauer-Schätzung aus deutschem Text (~2,3 Wörter/s), auf 2..15 s gekappt. */
 export function schaetzeDauer(text) {
   const woerter = text.trim().split(/\s+/).filter(Boolean).length;

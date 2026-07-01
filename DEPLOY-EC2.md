@@ -103,17 +103,27 @@ cd ~/worker && node hf-login.mjs
 > auf dem Server, URL am Laptop bestätigen, die zurückgegebene `127.0.0.1:8765/...`-URL
 > auf dem Server `curl`en → die CLI schließt den Login ab.
 
-### 6b) Persönlichen Account-Kontext wählen (einmalig)
-Die CLI verlangt eine Kontext-Wahl. Der persönliche Account (Credits + „SARAH
-Stimme" + Eule) wird **ohne Workspace-ID** gewählt — rein lokal, kein Netz:
+### 6b) Workspace setzen (einmalig)
+Die CLI 1.1.0 verlangt einen **gesetzten Workspace** (auch `account status`);
+`workspace unset` genügt NICHT. `higgsfield workspace list` kann mit „no response
+received" hängen — daher die Workspace-ID direkt per API holen (das ist zugleich
+der Netz-Test von server-2):
 ```bash
-higgsfield workspace unset
-higgsfield account status     # muss jetzt E-Mail/Plan/Credits zeigen
+TOKEN=$(higgsfield auth token 2>/dev/null | tr -d '[:space:]')
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  https://fnf-api-gw.higgsfield.ai/fnf/developer/v2alpha/account/workspaces
 ```
-> „No workspace selected" ist ein Client-Riegel, KEIN Fehler des Logins.
-> `higgsfield workspace list` braucht man NICHT (und es kann hängen). `generate`
-> hat keinen Workspace-Parameter. Der Worker führt `workspace unset` beim Start
-> ohnehin selbst aus — dieser Schritt dient nur der sofortigen Prüfung.
+- Kommt **JSON mit Workspace(s)** → die `"id"` merken und setzen:
+  ```bash
+  higgsfield workspace set <WORKSPACE_ID>
+  higgsfield account status        # muss jetzt E-Mail/Plan/Credits zeigen
+  ```
+- Kommt **Timeout / keine Antwort** → echtes Egress-Problem von server-2
+  (AWS Security Group „Outbound" / DNS) — API-Host ist global erreichbar (HTTP 401).
+- Kommt **401 „Invalid or expired token"** → Token abgelaufen, Login (Schritt 6) neu.
+
+> Einmal gesetzt, liegt die Workspace-ID in `~/.config/higgsfield/config.json` und
+> gilt auch für den Worker (gleicher User/HOME).
 
 ### 7) Erster echter Testlauf
 Zuerst in SARAH (`/video`) einen kurzen Text **„In Warteschlange legen"**. Dann:
