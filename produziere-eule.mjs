@@ -1,30 +1,28 @@
 /**
- * Higgsfield-Kette (bewährte Rezeptur aus dem Beweisvideo) über die offizielle
- * CLI `higgsfield`. Reine Konto-Anmeldung (kein API-Key) — genau das Konto/die
- * Credits, in dem "SARAH Stimme" + die Eule liegen.
+ * Higgsfield-Eulen-Kette — CLI-FREI, nur direkte HTTP-API-Calls gegen den
+ * fnf-api-gw mit Bearer-Token (aus hf-token.mjs, wird vor jedem Lauf erneuert).
+ * KEINE Abhängigkeit von den zickenden CLI-Befehlen.
  *
- *   1) TTS   : higgsfield generate create text2speech_v2
- *              --model elevenlabs --voice_type element --voice_id <SARAH Stimme>
- *              --prompt "<deutscher Text>" --wait            -> Audio (UUID/URL)
- *   2) VIDEO : higgsfield generate create wan2_7
- *              --start-image <Eule-UUID> --audio <Audio-UUID/Datei>
- *              --duration <n> --aspect_ratio 9:16 --prompt "<Eule-Prompt>" --wait
- *                                                            -> Video-URL (mp4)
+ * Reverse-engineert aus dem CLI-Binary + öffentlichem job_types-Schema
+ * (GET /fnf/developer/v2alpha/job_types/<model> = ohne Auth lesbar):
  *
- * WICHTIG (Ehrlichkeit): Der genaue stdout-Aufbau der CLI ist nicht öffentlich
- * dokumentiert. Das Parsen ist bewusst defensiv (JSON zuerst, dann UUID/URL-
- * Regex) und in EINER Funktion gekapselt (parseErgebnis) — beim ERSTEN echten
- * Lauf auf der eingeloggten Box einmal prüfen und ggf. nur dort nachziehen.
+ *   1) TTS   : POST /developer/v2alpha/audios/text2speech_v2/generations
+ *              { params:{ prompt, variant:"elevenlabs", voice_type:"element",
+ *                         voice_id:<SARAH Stimme> } }              -> job
+ *   2) VIDEO : POST /developer/v2alpha/videos/wan2_7/generations
+ *              { params:{ prompt, aspect_ratio:"9:16", duration,
+ *                         start_image:{ id:<Eule> },
+ *                         audio_references:[{ id:<TTS-job>, type:"text2speech_v2" }] } }
+ *   Poll    : GET /developer/v2alpha/jobs/<id> -> job_status + result_url
+ *
+ * Request-Wrapper { params:{...} } und Job-Response (job_id/job_set_id,
+ * job_status, result_url/min_result_url) stammen aus den json-Tags des Binaries.
  */
-import { spawnSync } from "node:child_process";
-import { writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { frischerToken } from "./hf-token.mjs";
 
-const BIN = process.env.HIGGSFIELD_BIN || "higgsfield";
+const API_BASE = process.env.HF_API_BASE || "https://fnf-api-gw.higgsfield.ai/fnf";
+const WORKSPACE_ID = process.env.HF_WORKSPACE_ID || "0b923f57-d0c1-479a-962d-859ae429e37a";
 
-// Bewährte, live-bewiesene Konstanten (identisch zu lib/video/eule.ts EULE_REZEPTUR).
 export const REZEPTUR = {
   owlMediaId: "1cf0ed3e-3730-4145-9e47-4b414655fe22", // Startbild: GOTT-WALD-Eule
   sarahVoiceId: "88dfb1f0-978d-48d0-aa89-9d5835e93e62", // Reference-Element "SARAH Stimme"
@@ -37,16 +35,12 @@ export const REZEPTUR = {
     "The GOTT-WALD owl speaks the words of the audio, beak opening and closing naturally in sync with the speech, warm trustworthy gaze, gentle glow. Calm, dignified. Subtle head movement.",
 };
 
-/** Signalisiert, dass der Higgsfield-Login abgelaufen ist (Job NICHT verwerfen). */
+/** Signalisiert, dass der Login/Token nicht erneuerbar ist (Job NICHT verwerfen). */
 export class LoginAbgelaufenError extends Error {
   constructor(msg) {
     super(msg);
     this.name = "LoginAbgelaufenError";
   }
-}
-
-function istLoginFehler(text) {
-  return /not authenticated|session expired|unauthori|auth login|please log ?in|401/i.test(text || "");
 }
 
 /** Grobe Dauer-Schätzung aus deutschem Text (~2,3 Wörter/s), auf 2..15 s gekappt. */
@@ -56,87 +50,94 @@ export function schaetzeDauer(text) {
   return Math.max(2, Math.min(REZEPTUR.maxClipSek, sek || 2));
 }
 
-/** CLI aufrufen. Wirft LoginAbgelaufenError bei Auth-Problemen, sonst Error mit Detail. */
-function cli(args, { timeoutMs = 600_000 } = {}) {
-  const r = spawnSync(BIN, [...args, "--json"], { encoding: "utf8", timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 });
-  const stdout = r.stdout || "";
-  const stderr = r.stderr || "";
-  if (r.error && r.error.code === "ENOENT") {
-    throw new Error(`Higgsfield-CLI nicht gefunden (BIN='${BIN}'). Installieren: npm i -g @higgsfield/cli`);
-  }
-  if (istLoginFehler(stdout + "\n" + stderr)) {
-    throw new LoginAbgelaufenError("Higgsfield-Login abgelaufen – auf dem Worker `higgsfield auth login` erneut ausführen.");
-  }
-  if (r.status !== 0) {
-    // --json evtl. nicht unterstützt? Einmal ohne --json versuchen, bevor wir aufgeben.
-    if (/unknown option|unrecognized|--json/i.test(stderr)) {
-      const r2 = spawnSync(BIN, args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 });
-      if (istLoginFehler((r2.stdout || "") + (r2.stderr || ""))) {
-        throw new LoginAbgelaufenError("Higgsfield-Login abgelaufen – `higgsfield auth login` erneut ausführen.");
-      }
-      if (r2.status === 0) return (r2.stdout || "") + "\n" + (r2.stderr || "");
-      throw new Error(`CLI ${args[0]} ${args[1]} -> exit ${r2.status}: ${(r2.stderr || r2.stdout || "").slice(0, 300)}`);
-    }
-    throw new Error(`CLI ${args[0]} ${args[1]} -> exit ${r.status}: ${(stderr || stdout).slice(0, 300)}`);
-  }
-  return stdout + "\n" + stderr;
+function headers(token) {
+  return {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    accept: "application/json",
+    "x-fnf-workspace-id": WORKSPACE_ID,
+    "x-fnf-surface": "developer",
+  };
 }
 
-/** Zieht id (UUID) und/oder URL (mp3/mp4/…) aus der CLI-Ausgabe. Defensiv. */
-export function parseErgebnis(ausgabe) {
-  let id = null;
-  let url = null;
-  // 1) JSON bevorzugt (falls die CLI JSON liefert).
-  const jsonKandidat = ausgabe.trim().match(/\{[\s\S]*\}/);
-  if (jsonKandidat) {
-    try {
-      const j = JSON.parse(jsonKandidat[0]);
-      const suche = (o) => {
-        if (!o || typeof o !== "object") return;
-        for (const [k, v] of Object.entries(o)) {
-          if (typeof v === "string") {
-            if (!url && /^https?:\/\/\S+\.(mp4|mov|webm|mp3|wav|m4a)(\?\S*)?$/i.test(v)) url = v;
-            if (!url && /^https?:\/\//i.test(v) && /url/i.test(k)) url = v;
-            if (!id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v) && /(^id$|_id$)/i.test(k)) id = v;
-          } else if (v && typeof v === "object") suche(v);
-        }
-      };
-      suche(j);
-    } catch {
-      /* Fallback unten */
-    }
-  }
-  // 2) Regex-Fallback über die gesamte Ausgabe. Bewusst eng begrenzt (stoppt an
-  //    Whitespace/Anführungszeichen/Klammern), damit kein Folgetext mitwandert.
-  if (!url) {
-    const m = ausgabe.match(/https?:\/\/[^\s"'\\<>)]+\.(?:mp4|mov|webm|mp3|wav|m4a)(?:\?[^\s"'\\<>)]*)?/i);
-    if (m) url = m[0];
-  }
-  if (!id) {
-    const m = ausgabe.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i);
-    if (m) id = m[0];
-  }
-  return { id, url };
+async function apiPost(pfad, body, token) {
+  const res = await fetch(`${API_BASE}${pfad}`, { method: "POST", headers: headers(token), body: JSON.stringify(body) });
+  const txt = await res.text();
+  let j = null;
+  try { j = JSON.parse(txt); } catch { /* nicht-JSON */ }
+  if (res.status === 401) throw new LoginAbgelaufenError(`401 vom API (${pfad}): ${txt.slice(0, 200)}`);
+  if (!res.ok) throw new Error(`POST ${pfad} -> ${res.status}: ${txt.slice(0, 400)}`);
+  return j ?? {};
 }
 
-async function ladeDatei(url, suffix) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Audio-Download fehlgeschlagen (${res.status})`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  const pfad = join(mkdtempSync(join(tmpdir(), "eule-")), `audio${suffix}`);
-  writeFileSync(pfad, buf);
-  return pfad;
+async function apiGet(pfad, token) {
+  const res = await fetch(`${API_BASE}${pfad}`, { headers: headers(token) });
+  const txt = await res.text();
+  let j = null;
+  try { j = JSON.parse(txt); } catch { /* nicht-JSON */ }
+  if (res.status === 401) throw new LoginAbgelaufenError(`401 vom API (${pfad}): ${txt.slice(0, 200)}`);
+  if (!res.ok) throw new Error(`GET ${pfad} -> ${res.status}: ${txt.slice(0, 400)}`);
+  return j ?? {};
+}
+
+/** Job-Id aus einer Generate-Antwort ziehen (job_id bevorzugt, dann job_set_id/id). */
+function jobIdAus(resp) {
+  const j = resp || {};
+  const kandidat =
+    j.job_id ||
+    (Array.isArray(j.jobs) && j.jobs[0] && (j.jobs[0].job_id || j.jobs[0].id)) ||
+    j.job_set_id ||
+    j.id;
+  if (!kandidat) throw new Error(`keine job-id in Antwort: ${JSON.stringify(j).slice(0, 400)}`);
+  return String(kandidat);
+}
+
+/** Ergebnis-URL aus einem Job ziehen (result_url/min_result_url/results[]). */
+function ergebnisUrl(job) {
+  const j = job || {};
+  if (typeof j.result_url === "string" && j.result_url) return j.result_url;
+  if (typeof j.min_result_url === "string" && j.min_result_url) return j.min_result_url;
+  const arr = Array.isArray(j.results) ? j.results : Array.isArray(j.jobs) ? j.jobs : [];
+  for (const r of arr) {
+    const u = r?.result_url || r?.min_result_url || r?.url || r?.raw?.url || r?.min?.url;
+    if (u) return u;
+  }
+  return null;
+}
+
+/** Job pollen bis fertig. Gibt die Ergebnis-URL. Wirft bei failed/nsfw/canceled. */
+async function warteAufJob(jobId, token, { maxMs = 600_000, intervallMs = 6000, label = "job" } = {}) {
+  const start = Date.now();
+  let letzter = "";
+  while (Date.now() - start < maxMs) {
+    await new Promise((r) => setTimeout(r, intervallMs));
+    const job = await apiGet(`/developer/v2alpha/jobs/${encodeURIComponent(jobId)}`, token).catch((e) => {
+      if (e instanceof LoginAbgelaufenError) throw e;
+      return null; // transient -> weiter pollen
+    });
+    if (!job) continue;
+    const status = String(job.job_status ?? job.status ?? "").toLowerCase();
+    letzter = status;
+    if (["completed", "complete", "succeeded", "success"].includes(status)) {
+      const url = ergebnisUrl(job);
+      if (!url) throw new Error(`${label} fertig, aber keine Ergebnis-URL: ${JSON.stringify(job).slice(0, 400)}`);
+      return url;
+    }
+    if (["failed", "error", "nsfw", "canceled", "cancelled"].includes(status)) {
+      throw new Error(`${label} endete mit Status '${status}': ${JSON.stringify(job).slice(0, 400)}`);
+    }
+  }
+  throw new Error(`${label} Timeout nach ${Math.round(maxMs / 1000)}s (letzter Status '${letzter}')`);
 }
 
 /**
  * Produziert EIN Eulen-Video aus deutschem Text. Gibt { videoUrl, audioRef, dauer }.
- * Wirft LoginAbgelaufenError, wenn der Login erneuert werden muss.
+ * Wirft LoginAbgelaufenError, wenn der Token nicht erneuerbar ist.
  */
 export async function produziereEule(text) {
-  // Vor der CLI-Kette den access_token frisch halten (CLI-Auto-Refresh ist
-  // unzuverlässig). Schlägt der Refresh fehl → Login abgelaufen (Job requeuen).
+  let token;
   try {
-    await frischerToken();
+    token = await frischerToken({ force: true });
   } catch (e) {
     throw new LoginAbgelaufenError(e instanceof Error ? e.message : String(e));
   }
@@ -144,31 +145,37 @@ export async function produziereEule(text) {
   const dauer = schaetzeDauer(text);
 
   // 1) TTS: text2speech_v2 mit geklonter "SARAH Stimme".
-  const ttsAus = cli([
-    "generate", "create", REZEPTUR.ttsModel,
-    "--model", REZEPTUR.ttsVariant,
-    "--voice_type", "element",
-    "--voice_id", REZEPTUR.sarahVoiceId,
-    "--prompt", text,
-    "--wait",
-  ]);
-  const tts = parseErgebnis(ttsAus);
-  if (!tts.id && !tts.url) throw new Error(`TTS lieferte weder Audio-UUID noch -URL. Ausgabe: ${ttsAus.slice(0, 300)}`);
-  // wan2_7 --audio akzeptiert "UUID oder Pfad": UUID bevorzugt, sonst Datei laden.
-  const audioRef = tts.id || (await ladeDatei(tts.url, ".mp3"));
+  const ttsResp = await apiPost(
+    `/developer/v2alpha/audios/${REZEPTUR.ttsModel}/generations`,
+    {
+      params: {
+        prompt: text,
+        variant: REZEPTUR.ttsVariant,
+        voice_type: "element",
+        voice_id: REZEPTUR.sarahVoiceId,
+      },
+    },
+    token,
+  );
+  const ttsJobId = jobIdAus(ttsResp);
+  const audioUrl = await warteAufJob(ttsJobId, token, { label: "TTS", maxMs: 300_000 });
 
-  // 2) VIDEO: wan2_7, Startbild = Eule, Audio = TTS-Ergebnis, 9:16.
-  const vidAus = cli([
-    "generate", "create", REZEPTUR.videoModel,
-    "--start-image", REZEPTUR.owlMediaId,
-    "--audio", String(audioRef),
-    "--duration", String(dauer),
-    "--aspect_ratio", REZEPTUR.aspect,
-    "--prompt", REZEPTUR.eulePrompt,
-    "--wait",
-  ]);
-  const vid = parseErgebnis(vidAus);
-  if (!vid.url) throw new Error(`wan2_7 lieferte keine Video-URL. Ausgabe: ${vidAus.slice(0, 300)}`);
+  // 2) VIDEO: wan2_7, Startbild = Eule, Audio = TTS-Job (chained), 9:16.
+  const vidResp = await apiPost(
+    `/developer/v2alpha/videos/${REZEPTUR.videoModel}/generations`,
+    {
+      params: {
+        prompt: REZEPTUR.eulePrompt,
+        aspect_ratio: REZEPTUR.aspect,
+        duration: dauer,
+        start_image: { id: REZEPTUR.owlMediaId },
+        audio_references: [{ id: ttsJobId, type: REZEPTUR.ttsModel }],
+      },
+    },
+    token,
+  );
+  const vidJobId = jobIdAus(vidResp);
+  const videoUrl = await warteAufJob(vidJobId, token, { label: "wan2_7", maxMs: 600_000 });
 
-  return { videoUrl: vid.url, audioRef: tts.url || tts.id || null, dauer };
+  return { videoUrl, audioRef: audioUrl, dauer };
 }

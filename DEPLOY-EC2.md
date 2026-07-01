@@ -103,28 +103,21 @@ cd ~/worker && node hf-login.mjs
 > auf dem Server, URL am Laptop bestätigen, die zurückgegebene `127.0.0.1:8765/...`-URL
 > auf dem Server `curl`en → die CLI schließt den Login ab.
 
-### 6b) Workspace setzen (einmalig)
-Die CLI 1.1.0 verlangt einen **gesetzten Workspace** (auch `account status`);
-`workspace unset` genügt NICHT. `higgsfield workspace list` kann mit „no response
-received" hängen — daher die Workspace-ID direkt per API holen. **Wichtig:** NICHT
-`higgsfield auth token` nutzen (liefert teils einen abgelaufenen Token) — sondern
-den Helfer `hf-token.mjs`, der bei Bedarf per `refresh_token` erneuert:
+### 6b) Kein Workspace-Setzen nötig (Worker ist CLI-frei)
+Der Worker ruft die Higgsfield-HTTP-API **direkt** auf (kein `higgsfield generate`,
+kein `account status`, kein `workspace set`). Der Workspace steckt fest im Header
+`X-Fnf-Workspace-Id` (Default `0b923f57-…`, überschreibbar via `HF_WORKSPACE_ID`),
+und der Token wird vor jedem Lauf über `hf-token.mjs` (refresh_token) erneuert.
+→ Die zickigen CLI-Befehle (`account status`/`workspace list` mit „no response
+received") spielen **keine Rolle mehr**. Es genügt der Login aus Schritt 6
+(`~/.config/higgsfield/credentials.json` mit gültigem `refresh_token`).
+
+Optionaler Netz-/Token-Check (nicht erforderlich):
 ```bash
 TOKEN=$(node ~/worker/hf-token.mjs)
-curl -sS -H "Authorization: Bearer $TOKEN" \
-  https://fnf-api-gw.higgsfield.ai/fnf/developer/v2alpha/account/workspaces
+curl -sS -H "Authorization: Bearer $TOKEN" -H "x-fnf-workspace-id: 0b923f57-d0c1-479a-962d-859ae429e37a" \
+  https://fnf-api-gw.higgsfield.ai/fnf/developer/v2alpha/account/balance
 ```
-- Kommt **JSON mit Workspace(s)** → die `"id"` merken und setzen:
-  ```bash
-  higgsfield workspace set <WORKSPACE_ID>
-  higgsfield account status        # muss jetzt E-Mail/Plan/Credits zeigen
-  ```
-- Kommt **Timeout / keine Antwort** → echtes Egress-Problem von server-2
-  (AWS Security Group „Outbound" / DNS) — API-Host ist global erreichbar (HTTP 401).
-- Kommt **401 „Invalid or expired token"** → Token abgelaufen, Login (Schritt 6) neu.
-
-> Einmal gesetzt, liegt die Workspace-ID in `~/.config/higgsfield/config.json` und
-> gilt auch für den Worker (gleicher User/HOME).
 
 ### 7) Erster echter Testlauf
 Zuerst in SARAH (`/video`) einen kurzen Text **„In Warteschlange legen"**. Dann:
