@@ -13,10 +13,9 @@ deshalb **kein GitHub-Token** nötig.
 | Wert | Woher | Wofür |
 |------|-------|-------|
 | **Supabase Service-Role-Key** | Supabase-Dashboard → Projekt `tatbddeqffquxltvpmbs` → Project Settings → API → `service_role` (secret) | Worker schreibt Video-URL in `video_jobs` (umgeht RLS) |
-| **Higgsfield-Konto** | die normalen Login-Daten | interaktiver Device-Login auf dem Laptop |
+| **Higgsfield-Konto** | die normalen Login-Daten | interaktiver OAuth-Login (Browser auf dem Laptop) |
 
 `SUPABASE_URL` ist nicht geheim (`https://tatbddeqffquxltvpmbs.supabase.co`).
-Ein GitHub-Token wird **nicht** mehr gebraucht (öffentlicher Clone).
 
 ---
 
@@ -65,20 +64,42 @@ chmod 600 ~/worker/.env
 nano ~/worker/.env    # Platzhalter ersetzen → Strg+O, Enter, Strg+X
 ```
 
-### 6) Bei Higgsfield einloggen (Device-Flow — der kritische Schritt)
-```bash
-higgsfield auth login
-```
-Die CLI zeigt **eine URL und einen Code** (Device-Flow). Dann:
-1. Auf **deinem eigenen Laptop** die angezeigte URL im Browser öffnen.
-2. Den angezeigten **Code** eingeben und mit deinem Higgsfield-Konto **bestätigen**.
-3. Zurück in der Shell: der Befehl erkennt die Freigabe selbst und meldet Erfolg.
+### 6) Higgsfield-Login HEADLESS (bewiesen — Loopback-Callback nachspielen)
 
-> Die Server-Shell braucht **keinen** eigenen Browser. Lass das Terminal offen,
-> bis „logged in"/„success" erscheint. (Falls die CLI stattdessen nur eine
-> `http://localhost:PORT`-URL zeigt statt einer higgsfield.ai-URL → siehe „Fallback"
-> unten.) Diesen Schritt als User `ubuntu` ausführen (kein `sudo`) — der Token
-> landet in `~/.config/higgsfield/` und muss zum Dienst-User passen.
+Die CLI kann nur **OAuth-Browser-Login** (kein Device-/Token-Modus). Auf einem
+Server ohne Browser scheitert der `127.0.0.1:8765`-Callback — Lösung: die CLI
+druckt die Login-URL und wartet; du machst den Browser-Teil am **Laptop** und
+spielst die zurückgegebene Callback-URL **auf dem Server** gegen dessen eigenen
+Listener ab. Kein SSH, keine Datei, nichts am Laptop zu installieren.
+
+**① Login starten (ganzen Block einfügen):**
+```bash
+cd ~/worker
+pkill -f 'auth login' 2>/dev/null; sleep 1
+export BROWSER=echo
+higgsfield auth login --port 8765 >/tmp/hflogin.txt 2>&1 &
+sleep 5
+echo; echo '>>> DIESE URL AUF DEINEM LAPTOP IM BROWSER OEFFNEN:'; echo
+grep -Eo 'https://[^ ]*oauth/authorize[^ ]*' /tmp/hflogin.txt | head -1
+echo; echo '(falls oben leer: Log unten)'; echo '----'; cat /tmp/hflogin.txt
+```
+
+**② Am Laptop:** die URL öffnen, mit dem **Higgsfield-Konto anmelden**. Der Browser
+springt danach auf `http://127.0.0.1:8765/callback?code=…&state=…` und zeigt
+**„Seite nicht erreichbar" — das ist normal.** Die **komplette Adresse** aus der
+Adresszeile **kopieren**.
+
+**③ Zurück in DERSELBEN Server-Shell** (URL einsetzen):
+```bash
+curl -s "HIER_DIE_KOMPLETTE_127.0.0.1-8765-URL_EINFUEGEN" >/dev/null
+sleep 3; cat /tmp/hflogin.txt
+higgsfield auth token >/dev/null 2>&1 && echo 'LOGIN OK' || echo 'nochmal Schritt 1 + 3'
+```
+
+> Zeigt ③ „invalid state"/Fehler (URL vertippt oder zu spät): einfach ① neu laufen
+> lassen (neue URL/state) und ②–③ wiederholen. `code` ist einmalig + kurzlebig.
+> Diesen Login als User `ubuntu` ausführen (kein `sudo`) — der Token landet in
+> `~/.config/higgsfield/` und muss zum Dienst-User (Schritt 8) passen.
 
 ### 7) Erster echter Testlauf
 Zuerst in SARAH (`/video`) einen kurzen Text **„In Warteschlange legen"**. Dann:
@@ -121,10 +142,8 @@ journalctl -u eule-worker -f
 MUSS als User `ubuntu` gelaufen sein (kein `sudo`).
 
 ### Bei „Login abgelaufen" (später, wiederkehrend)
-```bash
-higgsfield auth login        # als User ubuntu; Dienst muss nicht neu starten
-```
-Wartende Jobs werden danach automatisch fertig produziert (selbstheilend).
+Schritt 6 (①–③) erneut ausführen; der Dienst muss nicht neu starten. Wartende
+Jobs werden danach automatisch fertig produziert (selbstheilend).
 
 ### Worker-Update später (falls Code nachgezogen wird)
 ```bash
@@ -135,18 +154,20 @@ git -C ~/worker pull && sudo systemctl restart eule-worker
 
 ## Fallback / Stolpersteine im Browser-Shell (ehrlich)
 
-- **Clone:** läuft jetzt ohne Token (öffentliches Mirror-Repo). Der Mirror enthält
-  ausschließlich den Worker-Code + Platzhalter-`.env.example` — **keine Secrets**.
-- **Higgsfield-Login-Variante:** Sollte die CLI **keinen** Device-Code zeigen,
-  sondern einen lokalen `http://localhost:PORT`-Callback erwarten, funktioniert das
-  headless nicht direkt. Dann: `higgsfield auth login` gibt trotzdem eine URL aus —
-  diese am Laptop öffnen; scheitert der localhost-Rückkanal, hilft nur eine
-  SSH-Portweiterleitung (nicht via Instance-Connect-Browser-Shell). Erst am echten
-  Lauf sichtbar; deshalb Schritt 6 vor Schritt 8 testen.
-- **Interaktive Schritte (6 + 7):** laufen im Vordergrund — Browser-Tab offen
-  lassen. Instance-Connect-Sitzungen laufen nach ~60 min ab; Login vorher abschließen.
-- **`--einmal` braucht Voraussetzungen:** (a) Schritt 6 erfolgreich, (b) ein
-  `queued`-Job in SARAH. Sonst „keine offenen Jobs".
+- **Clone:** läuft ohne Token (öffentliches Mirror-Repo, keine Secrets).
+- **Login-Methode ist empirisch bestätigt** (CLI druckt die Authorize-URL, Listener
+  auf 127.0.0.1:8765 nimmt den nachgespielten Callback an; falscher `state` wird
+  sauber abgewiesen). Falls die „Seite nicht erreichbar"-Seite verwirrt: sie ist
+  erwartet — nur die Adresszeile zählt.
+- **Fallback (nur wenn ① keine URL zeigt):** Login auf einem Rechner MIT Browser
+  (CLI dort installieren, `higgsfield auth login`), dann den Inhalt von
+  `~/.config/higgsfield/credentials.json` (Linux) bzw.
+  `~/Library/Application Support/higgsfield/credentials.json` (macOS) auf dem Server
+  in dieselbe Datei schreiben (`mkdir -p ~/.config/higgsfield && cat > … <<'EOF' …`).
+  Enthält das Refresh-Token — nur in der eigenen Server-Shell einfügen.
+- **Interaktive Schritte (6 + 7):** Browser-Tab offen lassen; Instance-Connect-
+  Sitzungen laufen nach ~60 min ab — Login zügig abschließen.
+- **`--einmal` braucht:** (a) Login erfolgreich, (b) ein `queued`-Job in SARAH.
 - **Ungetestet bis Schritt 7:** das exakte CLI-Ausgabeformat (`parseErgebnis` in
-  `produziere-eule.mjs`). Schritt 7 ist genau der Prüfpunkt; weicht es ab, nur diese
-  eine Funktion nachziehen, in den Mirror pushen und `git -C ~/worker pull`.
+  `produziere-eule.mjs`). Schritt 7 ist der Prüfpunkt; weicht es ab, nur diese eine
+  Funktion nachziehen, in den Mirror pushen und `git -C ~/worker pull`.
