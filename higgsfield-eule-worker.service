@@ -1,0 +1,30 @@
+# systemd-Unit für den Eulen-Video-Worker.
+# Installieren:
+#   sudo cp higgsfield-eule-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now higgsfield-eule-worker
+# Logs:
+#   journalctl -u higgsfield-eule-worker -f
+#
+# WICHTIG: User/WorkingDirectory an die Box anpassen. Der Higgsfield-Login-Token
+# liegt im HOME dieses Users — deshalb muss `higgsfield auth login` als GENAU
+# dieser User laufen (sonst findet der Worker die Sitzung nicht).
+
+[Unit]
+Description=SARAH Eulen-Video-Worker (Higgsfield-Kette)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eule
+WorkingDirectory=/opt/sarah-eule-worker
+EnvironmentFile=/opt/sarah-eule-worker/.env
+ExecStart=/usr/bin/node worker.mjs
+Restart=always
+RestartSec=10
+# CLI liegt i.d.R. unter dem npm-global-bin; ggf. anpassen:
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
