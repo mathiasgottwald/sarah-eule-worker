@@ -20,8 +20,8 @@
  */
 import { frischerToken } from "./hf-token.mjs";
 
-const API_BASE = process.env.HF_API_BASE || "https://fnf-api-gw.higgsfield.ai/fnf";
-const WORKSPACE_ID = process.env.HF_WORKSPACE_ID || "0b923f57-d0c1-479a-962d-859ae429e37a";
+const API_BASE = (process.env.HF_API_BASE || "https://fnf-api-gw.higgsfield.ai/fnf").trim().replace(/\/+$/, "");
+const WORKSPACE_ID = (process.env.HF_WORKSPACE_ID || "0b923f57-d0c1-479a-962d-859ae429e37a").trim();
 
 export const REZEPTUR = {
   owlMediaId: "1cf0ed3e-3730-4145-9e47-4b414655fe22", // Startbild: GOTT-WALD-Eule
@@ -135,6 +135,7 @@ async function warteAufJob(jobId, token, { maxMs = 600_000, intervallMs = 6000, 
  * Wirft LoginAbgelaufenError, wenn der Token nicht erneuerbar ist.
  */
 export async function produziereEule(text) {
+  console.log(`[eule] API ${API_BASE} · workspace-header ${WORKSPACE_ID || "(LEER!)"}`);
   let token;
   try {
     token = await frischerToken({ force: true });
