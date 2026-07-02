@@ -7,22 +7,26 @@
  * → der Gateway spritzt dann KEINEN X-Fnf-Workspace-Id-Header ein → Backend
  * meldet „missing header". Kein Client-Header behebt das; nur die Selektion.
  *
- * `stelleWorkspaceSicher()` stellt vor jeder Produktion sicher, dass der
- * Workspace selektiert ist:
- *   1) Status je Surface prüfen (is_selected?).
- *   2) Wenn nicht: CLI `higgsfield workspace select <id>` (bzw. `set`) —
- *      die CLL kennt den exakten Select-Endpunkt; läuft mit hartem Timeout.
- *   3) Zusätzlich HTTP-Selbst-Select (Kandidaten-Endpunkte, mit Token).
- *   4) Erneut prüfen; die Surface mit is_selected=true wird zum Generieren genutzt.
- * Scheitert alles, landet eine glasklare Diagnose im Fehlertext.
+ * Vor jeder Produktion:
+ *   1) CLI `higgsfield workspace set <id>` (ABSOLUTER Pfad via HF_CLI_BIN, von
+ *      rerun.sh per `which higgsfield` aufgelöst — die CLI liegt im npm-Global-
+ *      Bin, NICHT /usr/local/bin → gestern ENOENT). Das ist der gestern bewiesene
+ *      Befehl („Selected workspace: …"). Hartes Timeout, kein Hängen.
+ *   2) Diagnose: is_selected je Surface loggen (hat set server-seitig gewirkt?).
+ *   3) Generieren über alle Surfaces durchprobieren (selektierte zuerst).
+ * Lehnen ALLE Surfaces den Workspace ab → finaler Beweis, dass generations für
+ * diesen Account nicht gehen (dann anderer Weg: MCP/Web). Sonst: Video-URL.
  */
 import { execFile } from "node:child_process";
 import { frischerToken } from "./hf-token.mjs";
 
 const API_BASE = (process.env.HF_API_BASE || "https://fnf-api-gw.higgsfield.ai/fnf").trim().replace(/\/+$/, "");
 const WORKSPACE_ID = (process.env.HF_WORKSPACE_ID || "0b923f57-d0c1-479a-962d-859ae429e37a").trim();
-const CLI_BIN = (process.env.HF_CLI_BIN || "/usr/local/bin/higgsfield").trim();
-// Surfaces, für die wir Selektion versuchen/nutzen (Reihenfolge = Priorität).
+// Absoluter Pfad zur CLI. rerun.sh löst ihn per `which higgsfield` auf und
+// übergibt HF_CLI_BIN (die CLI wurde per `npm i -g` installiert → NICHT
+// /usr/local/bin, daher gestern ENOENT). Fallback: blanker Name via PATH.
+const CLI_BIN = (process.env.HF_CLI_BIN || "higgsfield").trim();
+// Surfaces, die wir zum Generieren durchprobieren (Reihenfolge = Priorität).
 const SURFACES = (process.env.HF_SURFACES || "cli,developer,mcp,app,web").split(",").map((s) => s.trim()).filter(Boolean);
 
 export const REZEPTUR = {
@@ -91,74 +95,30 @@ async function workspaceStatus(token) {
   return { selektierteSurface: selektiert, alle, raw };
 }
 
-/** CLI-Select (kennt den exakten Endpunkt). Hartes Timeout, kein Hängen. */
-function cliSelect() {
+/**
+ * CLI `higgsfield workspace set <id>` — der GESTERN bewiesene Befehl
+ * („Selected workspace: …"). Absoluter Pfad (CLI_BIN), hartes Timeout, kein
+ * Hängen. Versucht `set` (bewiesen) und `select` (neuere CLI). Gibt Log-String.
+ */
+function cliWorkspaceSetzen() {
   const run = (args) => new Promise((resolve) => {
-    execFile(CLI_BIN, args, { timeout: 25_000, killSignal: "SIGKILL", env: { ...process.env, HOME: process.env.HOME || "/home/ubuntu", PATH: `${process.env.PATH || ""}:/usr/local/bin:/usr/bin:/bin` } },
-      (err, stdout, stderr) => resolve({ code: err?.code, killed: err?.killed, out: `${stdout || ""}${stderr || ""}`.trim().slice(0, 200) }));
+    execFile(CLI_BIN, args, {
+      timeout: 25_000, killSignal: "SIGKILL",
+      env: { ...process.env, HOME: process.env.HOME || "/home/ubuntu", PATH: `${process.env.PATH || ""}:/usr/local/bin:/usr/bin:/bin` },
+    }, (err, stdout, stderr) => resolve({
+      code: err?.code, enoent: err?.code === "ENOENT", killed: err?.killed,
+      out: `${stdout || ""}${stderr || ""}`.replace(/\s+/g, " ").trim().slice(0, 160),
+    }));
   });
   return (async () => {
-    const versuche = [["workspace", "select", WORKSPACE_ID], ["workspace", "set", WORKSPACE_ID]];
     const log = [];
-    for (const args of versuche) {
-      const r = await run(args);
-      log.push(`${args.join(" ")} → ${r.killed ? "TIMEOUT" : (r.code ?? "ok")}${r.out ? " · " + r.out : ""}`);
-      if (!r.code && !r.killed) break; // Erfolg
+    for (const sub of ["set", "select"]) {
+      const r = await run(["workspace", sub, WORKSPACE_ID]);
+      log.push(`${CLI_BIN} workspace ${sub} → ${r.enoent ? "ENOENT" : r.killed ? "TIMEOUT" : (r.code ?? "OK")}${r.out ? " · " + r.out : ""}`);
+      if (!r.code && !r.killed) break; // Erfolg → zweiten nicht nötig
     }
     return log.join(" | ");
   })();
-}
-
-/** HTTP-Selbst-Select: Kandidaten-Endpunkte mit Token+Surface. true bei 2xx. */
-async function httpSelect(token, surface) {
-  const kandidaten = [
-    ["POST", `/developer/v2alpha/account/workspaces/${WORKSPACE_ID}/select`, {}],
-    ["POST", `/developer/v2alpha/account/workspaces/select`, { workspace_id: WORKSPACE_ID }],
-    ["PATCH", `/developer/v2alpha/account/workspaces/${WORKSPACE_ID}`, { is_selected: true }],
-    ["POST", `/developer/v2alpha/account/select-workspace`, { workspace_id: WORKSPACE_ID }],
-    ["PUT", `/developer/v2alpha/account/selected-workspace`, { workspace_id: WORKSPACE_ID }],
-  ];
-  const notizen = [];
-  for (const [method, pfad, body] of kandidaten) {
-    try {
-      const res = await fetch(`${API_BASE}${pfad}`, { method, headers: headersFuer(token, surface), body: JSON.stringify(body) });
-      if (res.status === 401) throw new LoginAbgelaufenError("401 select");
-      if (res.ok) { notizen.push(`${method} ${pfad} → ${res.status} OK`); return { ok: true, notiz: notizen.join(" | ") }; }
-      notizen.push(`${method.split("")[0]}${pfad.split("/").pop()}:${res.status}`);
-    } catch (e) { if (e instanceof LoginAbgelaufenError) throw e; }
-  }
-  return { ok: false, notiz: notizen.join(" ") };
-}
-
-/**
- * Stellt sicher, dass WORKSPACE_ID selektiert ist, und gibt die Surface zurück,
- * mit der generiert werden soll. Wirft mit Diagnose, wenn nichts greift.
- */
-async function stelleWorkspaceSicher(token) {
-  let st = await workspaceStatus(token);
-  if (st.selektierteSurface) return st.selektierteSurface;
-
-  const cliLog = await cliSelect().catch((e) => `cli-fehler:${e.message?.slice(0, 80)}`);
-  st = await workspaceStatus(token);
-  if (st.selektierteSurface) { console.log(`[eule] Workspace via CLI selektiert (surface=${st.selektierteSurface}).`); return st.selektierteSurface; }
-
-  const httpNotizen = [];
-  for (const surface of SURFACES) {
-    const r = await httpSelect(token, surface);
-    httpNotizen.push(`${surface}:[${r.notiz}]`);
-    if (r.ok) {
-      st = await workspaceStatus(token);
-      if (st.selektierteSurface) { console.log(`[eule] Workspace via HTTP selektiert (surface=${st.selektierteSurface}).`); return st.selektierteSurface; }
-    }
-  }
-
-  const e = new Error(
-    `Workspace ${WORKSPACE_ID} ließ sich NICHT selektieren. ` +
-    `CLI: ${cliLog}. HTTP: ${httpNotizen.join(" ")}. ` +
-    `Status je Surface: ${JSON.stringify(st.alle)}. /account/workspaces: ${st.raw}`,
-  );
-  e._keineSelektion = true;
-  throw e;
 }
 
 /* ---------- Generierung ---------------------------------------------------- */
@@ -182,24 +142,34 @@ function ergebnisUrl(job) {
   return null;
 }
 
-/** Generieren mit fester Surface (Workspace ist selektiert). Query-Fallback bei Workspace-Meckern. */
-async function generiere(kind, model, params, token, surface) {
-  const url = `${API_BASE}/developer/v2alpha/${kind}/${model}/generations`;
-  const varianten = [
-    { u: url, extra: {} },
-    { u: `${url}?workspace_id=${encodeURIComponent(WORKSPACE_ID)}`, extra: {} }, // Query-Fallback
-  ];
-  let letzter = "";
-  for (const v of varianten) {
-    const res = await fetch(v.u, { method: "POST", headers: headersFuer(token, surface), body: JSON.stringify({ params: { ...params } }) });
-    const txt = await res.text();
-    if (res.status === 401) throw new LoginAbgelaufenError(`401 ${kind}/${model}`);
-    if (res.ok) { console.log(`[eule] ${kind}/${model} OK (surface=${surface}).`); return jobIdAus(JSON.parse(txt)); }
-    if (istCreditFehler(txt)) throw new Error(`${kind}/${model}: Credits fehlen — ${txt.slice(0, 200)}`);
-    letzter = `${res.status}: ${txt.slice(0, 200)}`;
-    if (!istWorkspaceFehler(txt)) throw new Error(`${kind}/${model} -> ${letzter}`);
+/** EIN Generierungs-Versuch mit fester Surface. Gibt {ok, jobId} oder {ok:false, workspace, txt, status}. */
+async function generiereEinmal(kind, model, params, token, surface) {
+  const res = await fetch(`${API_BASE}/developer/v2alpha/${kind}/${model}/generations`, {
+    method: "POST", headers: headersFuer(token, surface), body: JSON.stringify({ params: { ...params } }),
+  });
+  const txt = await res.text();
+  if (res.status === 401) throw new LoginAbgelaufenError(`401 ${kind}/${model}`);
+  if (res.ok) return { ok: true, jobId: jobIdAus(JSON.parse(txt)) };
+  if (istCreditFehler(txt)) throw new Error(`${kind}/${model}: Credits fehlen — ${txt.slice(0, 200)}`);
+  return { ok: false, workspace: istWorkspaceFehler(txt), status: res.status, txt: txt.replace(/\s+/g, " ").slice(0, 160) };
+}
+
+/**
+ * Generieren ROBUST: probiert die Surfaces durch (Workspace ist per `workspace
+ * set` selektiert). Erster Erfolg → {jobId, surface}. Meckern ALLE über den
+ * Workspace → finaler Beweis, dass generations für diesen Account nicht gehen.
+ */
+async function generiereRobust(kind, model, params, token, surfaces) {
+  const versuche = [];
+  for (const surface of surfaces) {
+    const r = await generiereEinmal(kind, model, params, token, surface);
+    if (r.ok) { console.log(`[eule] ${kind}/${model} OK (surface=${surface}).`); return { jobId: r.jobId, surface }; }
+    versuche.push(`${surface}:${r.status}${r.workspace ? "(ws)" : ""}`);
+    if (!r.workspace) throw new Error(`${kind}/${model} [${surface}] -> ${r.status}: ${r.txt}`); // echter anderer Fehler
   }
-  throw new Error(`${kind}/${model}: Workspace weiterhin abgelehnt (surface=${surface}) -> ${letzter}`);
+  const e = new Error(`${kind}/${model}: ALLE Surfaces lehnen den Workspace ab -> ${versuche.join(", ")}`);
+  e._workspaceFinal = true;
+  throw e;
 }
 
 async function warteAufJob(jobId, token, surface, { maxMs = 600_000, intervallMs = 6000, label = "job" } = {}) {
@@ -230,27 +200,44 @@ async function warteAufJob(jobId, token, surface, { maxMs = 600_000, intervallMs
 }
 
 export async function produziereEule(text) {
-  console.log(`[eule] API ${API_BASE} · workspace ${WORKSPACE_ID}`);
+  console.log(`[eule] API ${API_BASE} · workspace ${WORKSPACE_ID} · CLI ${CLI_BIN}`);
   let token;
   try { token = await frischerToken({ force: true }); }
   catch (e) { throw new LoginAbgelaufenError(e instanceof Error ? e.message : String(e)); }
 
-  const surface = await stelleWorkspaceSicher(token);
-  console.log(`[eule] generiere mit surface=${surface}`);
+  // Bewiesener Weg: CLI `workspace set <id>` (absoluter Pfad, kein ENOENT mehr).
+  const cliLog = await cliWorkspaceSetzen().catch((e) => `cli-fehler:${(e?.message || "").slice(0, 80)}`);
+  console.log(`[eule] ${cliLog}`);
+  // Diagnose: hat der set-Befehl is_selected server-seitig gesetzt?
+  const st = await workspaceStatus(token);
+  console.log(`[eule] is_selected nach set: ${JSON.stringify(st.alle)} → selektiert=${st.selektierteSurface || "KEINE"}`);
+  // Generieren: selektierte Surface zuerst, dann alle übrigen durchprobieren.
+  const surfaces = [...new Set([st.selektierteSurface, ...SURFACES].filter(Boolean))];
   const dauer = schaetzeDauer(text);
 
-  // 1) TTS
-  const ttsJobId = await generiere("audios", REZEPTUR.ttsModel, {
-    prompt: text, variant: REZEPTUR.ttsVariant, voice_type: "element", voice_id: REZEPTUR.sarahVoiceId,
-  }, token, surface);
-  const audioUrl = await warteAufJob(ttsJobId, token, surface, { label: "TTS", maxMs: 300_000 });
+  const macheFinal = (e) => {
+    if (e && e._workspaceFinal) {
+      e.message = `${e.message} || CLI: ${cliLog} || is_selected: ${JSON.stringify(st.alle)} || ` +
+        `FINALER BEFUND: Auch nach 'workspace set' akzeptiert der fnf-api-gw den Workspace für generations NICHT (privater Plus-Account). Anderer Produktionsweg nötig (MCP/Web).`;
+    }
+    return e;
+  };
 
-  // 2) wan2_7 (gleiche Surface)
-  const vidJobId = await generiere("videos", REZEPTUR.videoModel, {
+  // 1) TTS
+  let tts;
+  try {
+    tts = await generiereRobust("audios", REZEPTUR.ttsModel, {
+      prompt: text, variant: REZEPTUR.ttsVariant, voice_type: "element", voice_id: REZEPTUR.sarahVoiceId,
+    }, token, surfaces);
+  } catch (e) { throw macheFinal(e); }
+  const audioUrl = await warteAufJob(tts.jobId, token, tts.surface, { label: "TTS", maxMs: 300_000 });
+
+  // 2) wan2_7 (gleiche Surface wie erfolgreiches TTS)
+  const vid = await generiereRobust("videos", REZEPTUR.videoModel, {
     prompt: REZEPTUR.eulePrompt, aspect_ratio: REZEPTUR.aspect, duration: dauer,
-    start_image: { id: REZEPTUR.owlMediaId }, audio_references: [{ id: ttsJobId, type: REZEPTUR.ttsModel }],
-  }, token, surface);
-  const videoUrl = await warteAufJob(vidJobId, token, surface, { label: "wan2_7", maxMs: 600_000 });
+    start_image: { id: REZEPTUR.owlMediaId }, audio_references: [{ id: tts.jobId, type: REZEPTUR.ttsModel }],
+  }, token, [tts.surface]).catch((e) => { throw macheFinal(e); });
+  const videoUrl = await warteAufJob(vid.jobId, token, tts.surface, { label: "wan2_7", maxMs: 600_000 });
 
   return { videoUrl, audioRef: audioUrl, dauer };
 }
