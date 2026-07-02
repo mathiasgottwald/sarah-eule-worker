@@ -17,6 +17,7 @@ const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 const LOGIN_WARTE_MS = Number(process.env.LOGIN_WARTE_MS || 300_000);
 const EINMAL = process.argv.includes("--einmal");
+const ALLE = process.argv.includes("--alle"); // alle offenen Jobs abarbeiten, dann beenden
 
 if (!BASE || !KEY) {
   console.error("[worker] FEHLT: SUPABASE_URL und/oder SUPABASE_SERVICE_ROLE_KEY (siehe .env.example / ~/worker/.env).");
@@ -88,17 +89,17 @@ async function verarbeite(job) {
 }
 
 async function main() {
-  log(`gestartet. Poll alle ${POLL_MS / 1000}s.${EINMAL ? " (Einmal-Modus)" : ""}`);
+  log(`gestartet. Poll alle ${POLL_MS / 1000}s.${EINMAL ? " (Einmal-Modus)" : ALLE ? " (Alle-Modus: bis Warteschlange leer)" : ""}`);
   while (laeuftWeiter) {
     const job = await holeUndUebernimm().catch((e) => { log("Schleifenfehler:", e?.message); return null; });
     if (!job) {
-      if (EINMAL) { log("keine offenen Jobs — Ende (Einmal-Modus)."); break; }
+      if (EINMAL || ALLE) { log(`keine offenen Jobs — Ende (${EINMAL ? "Einmal" : "Alle"}-Modus).`); break; }
       await schlaf(POLL_MS);
       continue;
     }
     const ergebnis = await verarbeite(job);
     if (EINMAL) break;
-    if (ergebnis === "login") await schlaf(LOGIN_WARTE_MS);
+    if (ergebnis === "login") { if (ALLE) { log("Login-Problem — Alle-Modus endet."); break; } await schlaf(LOGIN_WARTE_MS); }
   }
   log("beendet.");
 }
