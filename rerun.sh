@@ -8,6 +8,13 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# Evtl. laufenden Dauer-Dienst stoppen, damit er nicht mit ALTER Logik dazwischenfunkt
+# (bester Aufwand, ohne Passwort-Hänger). Danach ggf. wieder starten mit:
+#   sudo systemctl start higgsfield-eule-worker
+for svc in higgsfield-eule-worker eule-worker; do
+  sudo -n systemctl stop "$svc" 2>/dev/null && echo "→ Dienst $svc gestoppt." || true
+done
+
 # .env laden (SUPABASE_URL / SERVICE_ROLE_KEY liegen NUR auf der Box).
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
 SB="${SUPABASE_URL:-${NEXT_PUBLIC_SUPABASE_URL:-}}"
