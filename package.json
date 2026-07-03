@@ -1,12 +1,20 @@
 {
   "name": "sarah-eule-worker",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "Unbeaufsichtigter Worker: produziert Eulen-Videos über die bewährte Higgsfield-CLI-Kette (text2speech_v2 -> wan2_7) und schreibt sie in SARAHs video_jobs zurück.",
-  "engines": { "node": ">=18" },
+  "description": "Unbeaufsichtigte SARAH-Worker für server-2: (1) Eulen-Video-Untertitel (ffmpeg) und (2) X/TikTok-Engagement (Playwright).",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
+  },
   "scripts": {
     "start": "node worker.mjs",
-    "einmal": "node worker.mjs --einmal"
+    "einmal": "node worker.mjs --einmal",
+    "engagement": "node engagement-worker.mjs beide",
+    "engagement:probe": "ENGAGEMENT_DRYRUN=1 node engagement-worker.mjs beide",
+    "login": "node engagement-login.mjs beide"
   }
 }
