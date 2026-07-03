@@ -42,9 +42,9 @@ const ZIELE = {
     datei: path.join(STATE_DIR, "tiktok-state.json"),
     name: "TikTok (@gott_wald)",
     async eingeloggt(page) {
-      const upload = await page.locator('[data-e2e="upload-icon"], [data-e2e="nav-upload"], [data-e2e="profile-icon"]').count();
+      const ein = await page.locator('[data-e2e="profile-icon"], [data-e2e="nav-profile"], [data-e2e="upload-icon"]').count();
       const login = await page.locator('[data-e2e="top-login-button"], [data-e2e="nav-login"]').count();
-      return upload > 0 && login === 0;
+      return ein > 0 && login === 0;
     },
   },
 };
@@ -63,7 +63,9 @@ async function capture(schluessel) {
   const z = ZIELE[schluessel];
   console.log(`\n▸ Öffne ${z.name} … logge dich im Fenster ein (2FA/Code ruhig durchführen).`);
   console.log(`  Ich erkenne automatisch, wenn du drin bist, und speichere dann (max ${TIMEOUT_SEK}s).`);
-  const browser = await chromium.launch({ headless: false });
+  // Echtes Google Chrome (channel:'chrome'), NICHT das gebündelte Chromium — dort
+  // funktioniert die X/TikTok-Anmeldung normal. Eigenes Profil, stört dein Haupt-Chrome nicht.
+  const browser = await chromium.launch({ headless: false, channel: process.env.LOGIN_CHANNEL || "chrome" });
   const context = await browser.newContext({ locale: "de-DE", timezoneId: "Europe/Zurich", viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   await page.goto(z.url, { waitUntil: "domcontentloaded" }).catch(() => {});

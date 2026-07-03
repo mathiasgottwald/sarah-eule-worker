@@ -162,11 +162,12 @@ const ADAPTER = {
     mentions: "https://www.tiktok.com/notifications",
     suche: (q) => `https://www.tiktok.com/search?q=${encodeURIComponent(q)}`,
     async eingeloggt(page) {
-      await page.goto("https://www.tiktok.com/", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
-      await schlaf(4000);
-      const upload = await page.locator('[data-e2e="upload-icon"], [data-e2e="nav-upload"], [data-e2e="profile-icon"]').count();
+      // WICHTIG: /foryou prüfen (Root zeigt die Nav-Signale nicht zuverlässig).
+      await page.goto("https://www.tiktok.com/foryou", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+      await schlaf(5000);
+      const ein = await page.locator('[data-e2e="profile-icon"], [data-e2e="nav-profile"], [data-e2e="upload-icon"]').count();
       const loginBtn = await page.locator('[data-e2e="top-login-button"], [data-e2e="nav-login"]').count();
-      return upload > 0 && loginBtn === 0;
+      return ein > 0 && loginBtn === 0;
     },
     async karten(page) { return page.locator('[data-e2e="search_top-item"], [data-e2e="search-card-video-caption"]'); },
     async kartenText(karte) { return (await karte.innerText().catch(() => "")) || ""; },
